@@ -134,16 +134,14 @@ For each tool, describe the specific failure mode you're handling and what the a
 
 Write out what a full user interaction looks like from start to finish — tool call by tool call. Use a specific example query.
 
+**What FitFindr does:** FitFindr takes a shopper's natural-language request, finds real secondhand listings that match it, and then helps them picture and share the find as a styled outfit. The planning loop runs three tools in sequence — `search_listings` fires first on the parsed query, `suggest_outfit` fires only if at least one listing was found (using the top result), and `create_fit_card` fires only if a non-empty outfit suggestion came back. Each tool's failure short-circuits the chain: if `search_listings` returns nothing the loop stops and tells the user what to adjust (never calling `suggest_outfit` with empty input), an empty wardrobe makes `suggest_outfit` fall back to general styling advice instead of erroring, and a missing outfit makes `create_fit_card` return a descriptive error string rather than raising.
+
 **Example user query:** "I'm looking for a vintage graphic tee under $30. I mostly wear baggy jeans and chunky sneakers. What's out there and how would I style it?"
 
-**Step 1:**
-<!-- What does the agent do first? Which tool is called? With what input? -->
+**Step 1 — Parse + search.** The loop parses the query into `description="vintage graphic tee"`, `size=None`, `max_price=30.0`, then calls `search_listings("vintage graphic tee", size=None, max_price=30.0)`. Items over $30 are dropped; the rest are scored on keyword overlap against title, description, and `style_tags`. The top matches are `lst_006` ("Graphic Tee — 2003 Tour Bootleg Style", $24, depop) and `lst_033` ("Vintage Band Tee — Faded Grey", $19, depop), both tagged `vintage` + `graphic tee`. The list is non-empty, so the loop continues.
 
-**Step 2:**
-<!-- What happens next? What was returned from step 1? What tool is called now? -->
+**Step 2 — Select + suggest.** The loop selects the top-scored result (`lst_006`, the bootleg graphic tee) as `selected_item` and calls `suggest_outfit(new_item=lst_006, wardrobe=example_wardrobe)`. The wardrobe is non-empty, so the LLM is asked to build outfits from named pieces — it returns something like: "Pair this boxy graphic tee with your baggy dark-wash jeans and chunky white sneakers for an easy 90s streetwear fit. Layer your vintage black denim jacket over the top when it's cooler." The string is non-empty, so the loop continues.
 
-**Step 3:**
-<!-- Continue until the full interaction is complete -->
+**Step 3 — Fit card.** The loop calls `create_fit_card(outfit=<the suggestion above>, new_item=lst_006)`. It returns a casual, shareable caption naming the item, price, and platform once each — e.g. "found this 2003 bootleg graphic tee on depop for $24 and it goes SO hard with my baggy jeans 🤎 90s fit fully assembled, chunky sneakers required."
 
-**Final output to user:**
-<!-- What does the user actually see at the end? -->
+**Final output to user:** The completed session shows the selected listing (title, price, platform, condition), the outfit suggestion, and the fit-card caption, with `session["error"] == None`. (On the no-results path — e.g. "designer ballgown size XXS under $5" — the user instead sees only the error message suggesting they loosen the price or broaden the search, and no outfit or card is generated.)

@@ -43,8 +43,33 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
            string and return it along with session["outfit_suggestion"] and
            session["fit_card"].
     """
-    # TODO: implement this function
-    return "Agent not yet implemented.", "", ""
+    # Step 1 — guard against an empty query.
+    if not user_query or not user_query.strip():
+        return "Please describe what you're looking for.", "", ""
+
+    # Step 2 — select the wardrobe based on the radio choice.
+    if wardrobe_choice == "Empty wardrobe (new user)":
+        wardrobe = get_empty_wardrobe()
+    else:
+        wardrobe = get_example_wardrobe()
+
+    # Step 3 — run the planning loop.
+    session = run_agent(user_query, wardrobe)
+
+    # Step 4 — error path: show the message in panel 1, leave the others blank.
+    if session["error"]:
+        return session["error"], "", ""
+
+    # Step 5 — success path: format the selected listing for panel 1.
+    item = session["selected_item"]
+    listing_text = (
+        f"{item['title']} — ${item['price']:g}\n"
+        f"{item['platform']} · condition: {item['condition']} · size: {item['size']}"
+    )
+    if item.get("brand"):
+        listing_text += f" · {item['brand']}"
+
+    return listing_text, session["outfit_suggestion"], session["fit_card"]
 
 
 # ── interface ─────────────────────────────────────────────────────────────────

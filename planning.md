@@ -98,6 +98,48 @@ The loop runs inside `run_agent(query, wardrobe)` and reads/writes a single `ses
 
 Every tool call is wrapped so an unexpected exception is converted into `session["error"]` and an early return — the loop never crashes the caller (Gradio).
 
+**Explicit branch logic (implementable as-is):**
+
+```text
+session = _new_session(query, wardrobe)
+
+# Step 1 — parse
+session["parsed"] = parse_query(query)
+#   parse_query returns {"description": str, "size": str|None, "max_price": float|None}
+
+# Step 2 — search, then GATE on emptiness
+try:
+    session["search_results"] = search_listings(
+        session["parsed"]["description"],
+        session["parsed"]["size"],
+        session["parsed"]["max_price"],
+    )
+except Exception:
+    session["error"] = "Couldn't load listings right now."
+    return session
+
+if len(session["search_results"]) == 0:          # BRANCH A: no matches
+    session["error"] = (
+        "No listings matched. Try raising your price or broadening the description."
+    )
+    return session                                # early return — DO NOT call suggest_outfit
+
+session["selected_item"] = session["search_results"][0]   # BRANCH B: take top result
+
+# Step 3 — suggest outfit (always returns non-empty text; no gate needed)
+session["outfit_suggestion"] = suggest_outfit(
+    session["selected_item"], session["wardrobe"]
+)
+
+# Step 4 — fit card
+session["fit_card"] = create_fit_card(
+    session["outfit_suggestion"], session["selected_item"]
+)
+
+# Step 5 — done
+return session            # success when error is None and fit_card is set
+```
+
 ---
 
 ## State Management
@@ -127,14 +169,14 @@ All state for one interaction lives in a single **`session` dict**, created by `
 
 For each tool, describe the specific failure mode you're handling and what the agent does in response.
 
-| Tool | Failure mode | Agent response |
+| Tool | Failure mode | Agent response (exact message + what it offers instead) |
 |------|-------------|----------------|
-| search_listings | No results match the query (empty list) | Loop sets `session["error"]` to a helpful message ("No matches — try raising the price or broadening the description") and returns early. `suggest_outfit` and `create_fit_card` are **never called** with empty input. UI shows the message in the listings panel, blanks the other two. |
-| search_listings | Dataset file missing / unreadable | Underlying `load_listings()` exception propagates; loop's try/except converts it to `session["error"]` = "Couldn't load listings right now." and returns early. |
-| suggest_outfit | Wardrobe is empty (`items == []`) | **Not treated as an error.** Tool switches to a general-styling-advice prompt and returns useful non-empty text; loop proceeds to `create_fit_card` normally. |
-| suggest_outfit | LLM/API failure (no key, network, empty completion) | Tool catches it and returns a safe non-empty fallback string; loop continues so the user still gets a fit card. |
-| create_fit_card | Outfit input missing or whitespace-only | Tool guards before any API call and returns a descriptive error string ("Can't make a fit card without an outfit suggestion.") — no exception. (Loop won't normally hit this since `suggest_outfit` always returns non-empty text.) |
-| create_fit_card | LLM/API failure | Tool catches it and returns a simple fallback caption built from item fields (title/price/platform). |
+| search_listings | No results match the query (empty list) | Loop sets `session["error"]` and returns early — `suggest_outfit`/`create_fit_card` are **never called**. User sees, in the 🛍️ panel: **"No listings matched 'designer ballgown' under $5. Try raising your price, dropping the size filter, or describing the item more broadly (e.g. 'gown' instead of 'designer ballgown')."** The message echoes the actual parsed terms so the user knows which filter to loosen; other two panels blank. |
+| search_listings | Dataset file missing / unreadable (`load_listings()` raises) | Loop's try/except sets `session["error"]` = **"Couldn't load the listings catalog right now — please refresh and try again in a moment."** and returns early. This is an infrastructure fault, not a bad query, so it does **not** suggest changing the search; it tells the user to retry. |
+| suggest_outfit | Wardrobe is empty (`items == []`) | **Not an error** — no message, no early return. Tool switches to general-advice mode and returns e.g. **"You don't have a wardrobe saved yet, so here's how to style it from scratch: this graphic tee leans 90s streetwear — pair it with baggy or wide-leg denim, chunky sneakers, and a cropped jacket. Add a wardrobe to get picks using your own pieces."** — which also nudges the user toward adding a wardrobe. Loop proceeds to `create_fit_card`. |
+| suggest_outfit | LLM/API failure (no key, network, empty completion) | Tool catches the exception and returns a non-empty fallback that's still useful: **"Couldn't reach the styling model just now, but this piece pairs easily with simple basics — neutral bottoms and clean sneakers. (Outfit ideas will be richer once the connection is back.)"** Loop continues so the user still gets a listing and a fit card. |
+| create_fit_card | Outfit input missing or whitespace-only | Guarded before any API call; returns the string **"Can't generate a fit card without an outfit suggestion — try finding an item first so I have a look to caption."** No exception. (The loop won't normally reach this since `suggest_outfit` always returns non-empty text; the guard protects direct/standalone calls.) |
+| create_fit_card | LLM/API failure | Tool catches it and returns a fallback caption built from the real item fields so the user still gets shareable text: **"Thrifted this Graphic Tee — 2003 Tour Bootleg Style on depop for $24 ✨ secondhand and styled."** (item title / platform / price interpolated from `new_item`). |
 
 ---
 
@@ -224,10 +266,25 @@ Write out what a full user interaction looks like from start to finish — tool 
 
 **Example user query:** "I'm looking for a vintage graphic tee under $30. I mostly wear baggy jeans and chunky sneakers. What's out there and how would I style it?"
 
-**Step 1 — Parse + search.** The loop parses the query into `description="vintage graphic tee"`, `size=None`, `max_price=30.0`, then calls `search_listings("vintage graphic tee", size=None, max_price=30.0)`. Items over $30 are dropped; the rest are scored on keyword overlap against title, description, and `style_tags`. The top matches are `lst_006` ("Graphic Tee — 2003 Tour Bootleg Style", $24, depop) and `lst_033` ("Vintage Band Tee — Faded Grey", $19, depop), both tagged `vintage` + `graphic tee`. The list is non-empty, so the loop continues.
+**Step 0 — Init.** `run_agent` builds a fresh `session` via `_new_session(query, example_wardrobe)`. All output fields start empty: `parsed={}`, `search_results=[]`, `selected_item=None`, `outfit_suggestion=None`, `fit_card=None`, `error=None`.
 
-**Step 2 — Select + suggest.** The loop selects the top-scored result (`lst_006`, the bootleg graphic tee) as `selected_item` and calls `suggest_outfit(new_item=lst_006, wardrobe=example_wardrobe)`. The wardrobe is non-empty, so the LLM is asked to build outfits from named pieces — it returns something like: "Pair this boxy graphic tee with your baggy dark-wash jeans and chunky white sneakers for an easy 90s streetwear fit. Layer your vintage black denim jacket over the top when it's cooler." The string is non-empty, so the loop continues.
+**Step 1 — Parse (no tool).** The loop runs `parse_query(query)`. Regex pulls `under $30` → `max_price=30.0`; no `size <token>` or standalone size keyword → `size=None`; the price phrase is stripped, leaving `description="vintage graphic tee"` (the styling sentence is ignored for search). **Writes** `session["parsed"] = {"description": "vintage graphic tee", "size": None, "max_price": 30.0}`.
 
-**Step 3 — Fit card.** The loop calls `create_fit_card(outfit=<the suggestion above>, new_item=lst_006)`. It returns a casual, shareable caption naming the item, price, and platform once each — e.g. "found this 2003 bootleg graphic tee on depop for $24 and it goes SO hard with my baggy jeans 🤎 90s fit fully assembled, chunky sneakers required."
+**Step 2 — First tool: `search_listings`.** Called as `search_listings("vintage graphic tee", size=None, max_price=30.0)`. It loads all 40 listings, drops anything over $30, skips the size filter (`size is None`), then scores each remaining listing by keyword overlap against `title`/`description`/`style_tags` and drops zero-score items. **Returns** a `list[dict]` of full listing records, best first:
+`[ {id:"lst_006", title:"Graphic Tee — 2003 Tour Bootleg Style", price:24.0, platform:"depop", size:"L", condition:"good", style_tags:["graphic tee","vintage","grunge","streetwear","band tee"], ...}, {id:"lst_033", title:"Vintage Band Tee — Faded Grey", price:19.0, platform:"depop", ...}, ... ]`.
+**Gate:** `len(results) > 0` → True. **Writes** `session["search_results"] = results`. **Next:** select top result.
 
-**Final output to user:** The completed session shows the selected listing (title, price, platform, condition), the outfit suggestion, and the fit-card caption, with `session["error"] == None`. (On the no-results path — e.g. "designer ballgown size XXS under $5" — the user instead sees only the error message suggesting they loosen the price or broaden the search, and no outfit or card is generated.)
+**Step 3 — Select.** `session["selected_item"] = session["search_results"][0]` → the full `lst_006` dict. No tool call; this is the loop wiring the search output into the next tool's input.
+
+**Step 4 — Second tool: `suggest_outfit`.** Called as `suggest_outfit(new_item=<lst_006 dict>, wardrobe=example_wardrobe)`. `wardrobe["items"]` has 10 entries (non-empty), so it builds the "style with named pieces" prompt and calls Groq (~0.7). **Returns** a non-empty `str`, e.g. *"Pair this boxy graphic tee with your baggy dark-wash jeans and chunky white sneakers for an easy 90s streetwear fit. Layer your vintage black denim jacket over the top when it's cooler."* **Writes** `session["outfit_suggestion"] = <that string>`. (Non-empty, so the loop proceeds — no gate failure.) **Next:** make the card.
+
+**Step 5 — Third tool: `create_fit_card`.** Called as `create_fit_card(outfit=<the Step 4 string>, new_item=<lst_006 dict>)`. The outfit string is non-empty (guard passes), so it calls Groq (~0.9). **Returns** a 2–4 sentence caption naming item/price/platform once each, e.g. *"found this 2003 bootleg graphic tee on depop for $24 and it goes SO hard with my baggy jeans 🤎 90s fit fully assembled, chunky sneakers required."* **Writes** `session["fit_card"] = <that string>`.
+
+**Step 6 — Return.** `error is None` and all three fields are populated, so `run_agent` returns the `session`.
+
+**What the user sees (success).** `app.py: handle_query` maps the session to the three UI panels:
+- 🛍️ **Top listing found:** "Graphic Tee — 2003 Tour Bootleg Style — $24 · depop · condition: good"
+- 👗 **Outfit idea:** the Step 4 suggestion text.
+- ✨ **Your fit card:** the Step 5 caption.
+
+**Contrast — the no-results path.** For `"designer ballgown size XXS under $5"`: parse → `description="designer ballgown"`, `size="XXS"`, `max_price=5.0`; `search_listings` returns `[]` (nothing under $5 / no ballgowns). The gate at Step 2 fires the error branch: `session["error"] = "No listings matched. Try raising your price or broadening the description."` and `run_agent` returns immediately. `suggest_outfit` and `create_fit_card` are never called; `selected_item`, `outfit_suggestion`, `fit_card` stay `None`. The UI shows the error string in the 🛍️ panel and leaves the 👗 and ✨ panels blank.

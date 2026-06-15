@@ -5,6 +5,8 @@ listings, and then helps them picture and share the find as a styled outfit. It
 runs three tools in a fixed, condition-gated planning loop and exposes them
 through a small Gradio UI.
 
+📹 **Demo video:** <https://drive.google.com/file/d/15CbbV5sSp55J3-FRTMf3PvoHwnRAStuI/view?usp=sharing>
+
 ```
 ai201-project2-fitfindr-starter/
 ├── app.py                     # Gradio UI + handle_query() (maps session → 3 panels)
